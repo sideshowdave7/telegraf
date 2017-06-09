@@ -5,11 +5,11 @@ package eventmq
 import (
 	"encoding/json"
 	"fmt"
-	uuid "github.com/google/uuid"
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/internal/errchan"
 	"github.com/influxdata/telegraf/plugins/inputs"
-	zmq "github.com/pebbe/zmq4"
+	zmq "github.com/zeromq/gomq"
+	"github.com/zeromq/gomq/zmtp"
 	"log"
 	"strings"
 	"sync"
@@ -19,7 +19,8 @@ const defaultURL = "tcp://localhost:47293"
 
 const DefaultTimeout = 5
 
-const ROUTER_SHOW_WORKERS = "ROUTER_SHOW_WORKERS"
+const SHOW_MANAGERS = "SHOW_MANAGERS"
+const SHOW_QUEUES = "SHOW_QUEUES"
 const STATUS = "STATUS"
 const EMQP_VERSION = "eMQP/1.0"
 
@@ -63,26 +64,26 @@ type EventMQ struct {
 	Workers       []string
 }
 
-func (emq *EventMQ) Request(command string, target interface{}) error {
+func (emq *EventMQ) Request(command string, subcommand string, target interface{}) error {
 	if emq.URL == "" {
 		emq.URL = defaultURL
 	}
 
-	context, _ := zmq.NewContext()
-	socket, _ := context.NewSocket(zmq.DEALER)
-	defer socket.Close()
+	dealer := zmq.NewDealer(zmtp.NewSecurityNull(), generate_uuid())
+	err := dealer.Connect(emq.URL)
+	if err != nil {
+		panic(err)
+	}
+	defer dealer.Close()
 
-	socket.SetIdentity(generate_uuid())
-	socket.Connect("tcp://localhost:47293")
-
-	send_command(socket, command, target)
+	send_command(dealer, command, subcommand, target)
 	return nil
 }
 
 func gatherStatus(emq *EventMQ, acc telegraf.Accumulator, errChan chan error) {
 	status := &StatusResponse{}
 
-	err := emq.Request(STATUS, &status)
+	err := emq.Request(STATUS, SHOW_MANAGERS, &status)
 	if err != nil {
 		errChan <- err
 		return
@@ -107,7 +108,7 @@ func gatherStatus(emq *EventMQ, acc telegraf.Accumulator, errChan chan error) {
 
 func gatherQueues(emq *EventMQ, acc telegraf.Accumulator, errChan chan error) {
 	workers := &WorkersResponse{}
-	err := emq.Request(ROUTER_SHOW_WORKERS, &workers)
+	err := emq.Request(STATUS, SHOW_QUEUES, &workers)
 	if err != nil {
 		errChan <- err
 		return
@@ -132,12 +133,23 @@ func gatherQueues(emq *EventMQ, acc telegraf.Accumulator, errChan chan error) {
 
 	log.Printf("============ Connected Workers =================")
 	for key, element := range workers.ConnectedWorkers {
+		id := "unkown"
+		hostname := "unkown"
+
+		if len(strings.Split(key, ":")) > 1 {
+			id = strings.Split(key, ":")[1]
+			hostname = strings.Split(key, ":")[0]
+		} else {
+			id = key
+		}
+
 		acc.AddFields("eventmq_workers",
 			map[string]interface{}{
 				"available_slots": element.AvailableSlots,
 			},
 			map[string]string{
-				"id": key,
+				"id":       id,
+				"hostname": hostname,
 			})
 		log.Printf("Worker %s: Slots Available: %d, HB: %f", key, element.AvailableSlots, element.Hb)
 	}
@@ -171,26 +183,31 @@ func (emq *EventMQ) Gather(acc telegraf.Accumulator) error {
 }
 
 func generate_uuid() string {
-	return uuid.Must(uuid.NewRandom()).String()
+	uuid, err := zmq.NewUUID()
+	if err != nil {
+	}
+
+	return uuid
 }
 
-func send_command(socket *zmq.Socket, command string, target interface{}) []string {
+func send_command(socket zmq.Dealer, command string, subcommand string, target interface{}) [][]byte {
 
-	msg := make([][]byte, 4)
+	msg := make([][]byte, 5)
 	msg[0] = []byte("")
 	msg[1] = []byte(EMQP_VERSION)
 	msg[2] = []byte(command)
 	msg[3] = []byte(fmt.Sprintf("admin:%s", generate_uuid()))
+	msg[4] = []byte(subcommand)
 
 	log.Printf("Sending message: %s", msg)
-	socket.SendMessage(msg)
+	socket.SendMultipart(msg)
 
-	reply, err := socket.RecvMessage(0)
+	reply, err := socket.RecvMultipart()
 	if err != nil {
 	}
 
-	switch command {
-	case STATUS:
+	switch subcommand {
+	case SHOW_QUEUES:
 		resp := &StatusResponse{}
 		json.Unmarshal([]byte(reply[4]), target)
 
@@ -201,7 +218,7 @@ func send_command(socket *zmq.Socket, command string, target interface{}) []stri
 			log.Printf("Queue: %s, Waiting Messages: %s", name, count)
 		}
 
-	case ROUTER_SHOW_WORKERS:
+	case SHOW_MANAGERS:
 		resp := &WorkersResponse{}
 		json.Unmarshal([]byte(reply[4]), target)
 
