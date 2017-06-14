@@ -19,8 +19,7 @@ const defaultURL = "tcp://localhost:47293"
 
 const DefaultTimeout = 5
 
-const SHOW_MANAGERS = "SHOW_MANAGERS"
-const SHOW_QUEUES = "SHOW_QUEUES"
+const ROUTER_SHOW_WORKERS = "ROUTER_SHOW_WORKERS"
 const STATUS = "STATUS"
 const EMQP_VERSION = "eMQP/1.0"
 
@@ -64,7 +63,7 @@ type EventMQ struct {
 	Workers       []string
 }
 
-func (emq *EventMQ) Request(command string, subcommand string, target interface{}) error {
+func (emq *EventMQ) Request(command string, target interface{}) error {
 	if emq.URL == "" {
 		emq.URL = defaultURL
 	}
@@ -76,14 +75,14 @@ func (emq *EventMQ) Request(command string, subcommand string, target interface{
 	}
 	defer dealer.Close()
 
-	send_command(dealer, command, subcommand, target)
+	send_command(dealer, command, target)
 	return nil
 }
 
 func gatherStatus(emq *EventMQ, acc telegraf.Accumulator, errChan chan error) {
 	status := &StatusResponse{}
 
-	err := emq.Request(STATUS, SHOW_MANAGERS, &status)
+	err := emq.Request(STATUS, &status)
 	if err != nil {
 		errChan <- err
 		return
@@ -100,7 +99,7 @@ func gatherStatus(emq *EventMQ, acc telegraf.Accumulator, errChan chan error) {
 				"name": name,
 			})
 
-		log.Printf("Queue: %s, Waiting Messages: %s", name, count)
+		// log.Printf("Queue: %s, Waiting Messages: %s", name, count)
 	}
 
 	errChan <- nil
@@ -108,14 +107,14 @@ func gatherStatus(emq *EventMQ, acc telegraf.Accumulator, errChan chan error) {
 
 func gatherQueues(emq *EventMQ, acc telegraf.Accumulator, errChan chan error) {
 	workers := &WorkersResponse{}
-	err := emq.Request(STATUS, SHOW_QUEUES, &workers)
+	err := emq.Request(ROUTER_SHOW_WORKERS, &workers)
 	if err != nil {
 		errChan <- err
 		return
 	}
 
-	log.Printf("============ Connected Queues =================")
-	for key, element := range workers.ConnectedQueues {
+	// log.Printf("============ Connected Queues =================")
+	for _, element := range workers.ConnectedQueues {
 		for _, info := range element {
 			queue, _ := info[1].(string)
 			priority, _ := info[0].(float64)
@@ -127,11 +126,11 @@ func gatherQueues(emq *EventMQ, acc telegraf.Accumulator, errChan chan error) {
 				map[string]string{
 					"queue": queue,
 				})
-			log.Printf("Queue %s ID: %s, priority: %d", key, queue, int(priority))
+			// log.Printf("Queue %s ID: %s, priority: %d", key, queue, int(priority))
 		}
 	}
 
-	log.Printf("============ Connected Workers =================")
+	// log.Printf("============ Connected Workers =================")
 	for key, element := range workers.ConnectedWorkers {
 		id := "unkown"
 		hostname := "unkown"
@@ -151,7 +150,7 @@ func gatherQueues(emq *EventMQ, acc telegraf.Accumulator, errChan chan error) {
 				"id":       id,
 				"hostname": hostname,
 			})
-		log.Printf("Worker %s: Slots Available: %d, HB: %f", key, element.AvailableSlots, element.Hb)
+		// log.Printf("Worker %s: Slots Available: %d, HB: %f", key, element.AvailableSlots, element.Hb)
 	}
 }
 
@@ -190,51 +189,52 @@ func generate_uuid() string {
 	return uuid
 }
 
-func send_command(socket zmq.Dealer, command string, subcommand string, target interface{}) [][]byte {
+func send_command(socket zmq.Dealer, command string, target interface{}) [][]byte {
 
 	msg := make([][]byte, 5)
 	msg[0] = []byte("")
 	msg[1] = []byte(EMQP_VERSION)
 	msg[2] = []byte(command)
 	msg[3] = []byte(fmt.Sprintf("admin:%s", generate_uuid()))
-	msg[4] = []byte(subcommand)
 
-	log.Printf("Sending message: %s", msg)
+	// log.Printf("Sending message: %s", msg)
 	socket.SendMultipart(msg)
 
 	reply, err := socket.RecvMultipart()
 	if err != nil {
 	}
 
-	switch subcommand {
-	case SHOW_QUEUES:
-		resp := &StatusResponse{}
-		json.Unmarshal([]byte(reply[4]), target)
+	// log.Printf(string(reply[5]))
 
-		log.Printf("============ Status =================")
-		for _, element := range resp.WaitingMessageCounts {
-			name := strings.Split(element, ": ")[0]
-			count := strings.Split(element, ": ")[1]
-			log.Printf("Queue: %s, Waiting Messages: %s", name, count)
-		}
+	switch command {
+	case STATUS:
+		// resp := &StatusResponse{}
+		json.Unmarshal(reply[5], target)
 
-	case SHOW_MANAGERS:
-		resp := &WorkersResponse{}
-		json.Unmarshal([]byte(reply[4]), target)
+		// log.Printf("============ Status =================")
+		// for _, element := range resp.WaitingMessageCounts {
+		// name := strings.Split(element, ": ")[0]
+		// count := strings.Split(element, ": ")[1]
+		// log.Printf("Queue: %s, Waiting Messages: %s", name, count)
+		// }
 
-		log.Printf("============ Connected Queues =================")
-		for key, element := range resp.ConnectedQueues {
-			for _, info := range element {
-				queue, _ := info[1].(string)
-				priority, _ := info[0].(float64)
-				log.Printf("Queue %s ID: %s, priority: %d", key, queue, int(priority))
-			}
-		}
+	case ROUTER_SHOW_WORKERS:
+		// resp := &WorkersResponse{}
+		json.Unmarshal(reply[5], target)
 
-		log.Printf("============ Connected Workers =================")
-		for key, element := range resp.ConnectedWorkers {
-			log.Printf("Worker %s: Slots Available: %d, HB: %f", key, element.AvailableSlots, element.Hb)
-		}
+		// log.Printf("============ Connected Queues =================")
+		// for key, element := range resp.ConnectedQueues {
+		// 	for _, info := range element {
+		// 		queue, _ := info[1].(string)
+		// 		priority, _ := info[0].(float64)
+		// 		// log.Printf("Queue %s ID: %s, priority: %d", key, queue, int(priority))
+		// 	}
+		// }
+
+		// log.Printf("============ Connected Workers =================")
+		// for key, element := range resp.ConnectedWorkers {
+		// log.Printf("Worker %s: Slots Available: %d, HB: %f", key, element.AvailableSlots, element.Hb)
+		// }
 	default:
 		log.Printf("Unknown command: %s", command)
 	}
